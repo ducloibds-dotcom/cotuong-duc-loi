@@ -1,6 +1,8 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
+import { playSelect, playMove, playCapture, playCheck, playWin, playLose, playLevelUp, isMuted, setMuted } from "./sound.js";
 
-// ===== Cờ Tướng v3 — 100 cấp độ · Bộ đếm thời gian · Giải thưởng lũy thừa · localStorage =====
+// ===== Cờ Tướng v4 — 100 cấp độ · Bộ đếm thời gian · Giải thưởng lũy thừa · localStorage
+//        · Âm thanh nhiều cấp độ · Sáng quân vừa đi · PWA (chạy offline, cài vào máy) =====
 
 const COLS = 9;
 const ROWS = 10;
@@ -158,6 +160,20 @@ function hasKing(board, side) {
   return false;
 }
 
+function findKing(board, side) {
+  for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++)
+    if(board[r][c]&&board[r][c].type==="k"&&board[r][c].side===side) return [r,c];
+  return null;
+}
+
+// Bên "side" có đang bị chiếu tướng không (quân đối phương có nước đi ăn được Tướng của "side")
+function isInCheck(board, side) {
+  const kingPos = findKing(board, side);
+  if(!kingPos) return false;
+  const enemy = side === "r" ? "b" : "r";
+  return getAllMoves(board, enemy).some(m => m.to[0]===kingPos[0] && m.to[1]===kingPos[1]);
+}
+
 function negamax(board, depth, side, alpha, beta) {
   const opp=side==="r"?"b":"r";
   if(!hasKing(board,opp)) return 100000;
@@ -253,7 +269,7 @@ function formatTime(s) {
 }
 
 // ===== Main Component =====
-export default function XiangqiV3() {
+export default function XiangqiV4() {
   const [board, setBoard] = useState(initialBoard);
   const [turn, setTurn] = useState("r");
   const [selected, setSelected] = useState(null);
@@ -273,6 +289,14 @@ export default function XiangqiV3() {
     catch { return []; }
   });
   const [showLevelMap, setShowLevelMap] = useState(false);
+  const [lastMove, setLastMove] = useState(null); // { from:[r,c], to:[r,c], side }
+  const [checkSide, setCheckSide] = useState(null); // 'r' | 'b' | null — bên đang bị chiếu
+  const [muted, setMutedState] = useState(() => isMuted());
+  function toggleMuted() {
+    const next = !muted;
+    setMuted(next);
+    setMutedState(next);
+  }
   // Persist progress to localStorage
   useEffect(() => {
     try { localStorage.setItem("ct_completed", JSON.stringify(completedLevels)); } catch {}
@@ -304,21 +328,45 @@ export default function XiangqiV3() {
     const cap = newBoard[tr][tc];
     newBoard[tr][tc] = moved;
     newBoard[fr][fc] = null;
+
+    setLastMove({ from: [fr, fc], to: [tr, tc], side: currentTurn });
+    setBoard(newBoard);
+    setHistory(h => [...h, `${currentTurn==="r"?"Đỏ":"Đen"}: ${PIECE_LABEL[moved.type][moved.side]} (${fc},${fr})→(${tc},${tr})`]);
+    setSelected(null);
+
     if(cap) {
       setCaptured(prev => ({ ...prev, [cap.side]: [...prev[cap.side], cap] }));
       if(cap.type === "k") {
         setWinner(currentTurn);
         setGameStarted(false);
-        if(currentTurn === "r" && mode === "ai") {
+        setCheckSide(null);
+        const playerWon = currentTurn === "r" && mode === "ai";
+        const aiWon = mode === "ai" && currentTurn === aiSide;
+        if(playerWon) {
           setCompletedLevels(prev => prev.includes(level) ? prev : [...prev, level]);
           setShowRewardPop(true);
+          playWin();
+        } else if(aiWon) {
+          playLose();
+        } else {
+          playWin();
         }
+        return;
       }
+      playCapture(level);
+    } else {
+      playMove(level);
     }
-    setBoard(newBoard);
-    setHistory(h => [...h, `${currentTurn==="r"?"Đỏ":"Đen"}: ${PIECE_LABEL[moved.type][moved.side]} (${fc},${fr})→(${tc},${tr})`]);
-    setSelected(null);
-    setTurn(currentTurn === "r" ? "b" : "r");
+
+    const nextTurn = currentTurn === "r" ? "b" : "r";
+    setTurn(nextTurn);
+
+    if(isInCheck(newBoard, nextTurn)) {
+      setCheckSide(nextTurn);
+      playCheck(level);
+    } else {
+      setCheckSide(null);
+    }
   }
 
   function handleClick(r, c) {
@@ -329,10 +377,11 @@ export default function XiangqiV3() {
       const [sr, sc] = selected;
       const isLegal = legalMoves.some(([mr,mc]) => mr===r && mc===c);
       if(isLegal) { doMove(sr,sc,r,c); return; }
-      if(piece && piece.side === turn) { setSelected([r,c]); }
+      if(piece && piece.side === turn) { setSelected([r,c]); playSelect(level); }
       else { setSelected(null); }
     } else if(piece && piece.side === turn) {
       setSelected([r,c]);
+      playSelect(level);
     }
   }
 
@@ -358,8 +407,13 @@ export default function XiangqiV3() {
     setAiThinking(false);
     setShowRewardPop(false);
     setGameStarted(true);
+    setLastMove(null);
+    setCheckSide(null);
     resetTimer();
-    if(newLevel !== undefined) setLevel(newLevel);
+    if(newLevel !== undefined) {
+      if(newLevel > level) playLevelUp();
+      setLevel(newLevel);
+    }
   }
 
   const reward = getReward(level);
@@ -380,6 +434,19 @@ export default function XiangqiV3() {
       fontFamily:"'Noto Serif SC','Songti SC',serif",
       color:"#e8dcc4",
     }}>
+      <style>{`
+        @keyframes ctLastMoveGlow {
+          0%   { opacity: 0.95; filter: drop-shadow(0 0 2px currentColor); }
+          50%  { opacity: 0.3;  filter: drop-shadow(0 0 12px currentColor); }
+          100% { opacity: 0.95; filter: drop-shadow(0 0 2px currentColor); }
+        }
+        .ct-glow-to { animation: ctLastMoveGlow 1.15s ease-in-out infinite; }
+        @keyframes ctCheckRing {
+          0%, 100% { stroke-opacity: 1; r: 27px; }
+          50%      { stroke-opacity: 0.25; r: 30px; }
+        }
+        .ct-check-ring { animation: ctCheckRing 0.75s ease-in-out infinite; }
+      `}</style>
 
       {/* Brand banner */}
       <div style={{ textAlign:"center", marginBottom:6 }}>
@@ -394,7 +461,7 @@ export default function XiangqiV3() {
 
       {/* Header */}
       <div style={{ textAlign:"center", marginBottom:12 }}>
-        <div style={{ fontSize:"clamp(9px,2.6vw,11px)", letterSpacing:"clamp(2px,1vw,6px)", color:"#7a6540", marginBottom:2 }}>VERSION 3.0</div>
+        <div style={{ fontSize:"clamp(9px,2.6vw,11px)", letterSpacing:"clamp(2px,1vw,6px)", color:"#7a6540", marginBottom:2 }}>VERSION 4.0</div>
         <h1 style={{ fontSize:"clamp(20px,7vw,28px)", letterSpacing:"clamp(1px,1vw,4px)", margin:0, color:"#d8b872", fontWeight:700, textShadow:"0 0 20px rgba(216,184,114,0.4)" }}>
           棋 CỜ TƯỚNG 局
         </h1>
@@ -433,6 +500,13 @@ export default function XiangqiV3() {
             borderRadius:20, cursor:"pointer", fontFamily:"inherit",
             background:showLevelMap?"#a3231f":"transparent", color:"#e8dcc4" }}>
           {showLevelMap ? "Ẩn bản đồ" : "🗺 Bản đồ cấp độ"}
+        </button>
+        <button onClick={toggleMuted} title={muted ? "Bật âm thanh" : "Tắt âm thanh"}
+          style={{ width:32, height:32, borderRadius:"50%", border:"1px solid #5a4629",
+            cursor:"pointer", fontFamily:"inherit", fontSize:14,
+            background:"transparent", color:"#e8dcc4", display:"flex",
+            alignItems:"center", justifyContent:"center" }}>
+          {muted ? "🔇" : "🔊"}
         </button>
       </div>
 
@@ -476,6 +550,9 @@ export default function XiangqiV3() {
         ) : (
           <span style={{ opacity:0.75 }}>
             Lượt đi: <strong style={{ color:turn==="r"?"#eb4d4b":"#d8b872" }}>{turn==="r"?"ĐỎ":mode==="ai"?"ĐEN (Máy)":"ĐEN"}</strong>
+            {checkSide === turn && (
+              <strong style={{ color:"#ff4757", marginLeft:8 }}>· CHIẾU TƯỚNG!</strong>
+            )}
           </span>
         )}
       </div>
@@ -521,6 +598,11 @@ export default function XiangqiV3() {
             <circle key={i} cx={c*cellSize} cy={r*cellSize} r={8}
               fill={board[r][c]?"rgba(180,40,30,0.55)":"rgba(60,120,60,0.55)"} />
           ))}
+          {/* Ô xuất phát của nước đi vừa rồi — đánh dấu mờ để biết quân vừa rời khỏi đâu */}
+          {lastMove && (
+            <circle cx={lastMove.from[1]*cellSize} cy={lastMove.from[0]*cellSize} r={6}
+              fill={lastMove.side==="r"?"rgba(235,77,75,0.55)":"rgba(249,202,36,0.55)"} />
+          )}
           {/* Click zones */}
           {Array.from({length:ROWS}).map((_,r) =>
             Array.from({length:COLS}).map((_,c) => (
@@ -533,10 +615,22 @@ export default function XiangqiV3() {
           {board.map((row,r) => row.map((piece,c) => {
             if(!piece) return null;
             const isSel = selected && selected[0]===r && selected[1]===c;
+            const isLastTo = lastMove && lastMove.to[0]===r && lastMove.to[1]===c;
+            const inCheckHere = checkSide && piece.type==="k" && piece.side===checkSide;
             return (
               <g key={`p-${r}-${c}`} transform={`translate(${c*cellSize},${r*cellSize})`}
                 onClick={() => handleClick(r,c)} style={{ cursor:"pointer" }}>
                 {isSel && <circle r={26} fill="rgba(63,174,92,0.25)" />}
+                {/* Quân vừa đi xong — sáng lên bằng vòng viền nhấp nháy màu theo phe */}
+                {isLastTo && (
+                  <circle r={25} fill="none" strokeWidth={3} className="ct-glow-to"
+                    stroke={piece.side==="r"?"#eb4d4b":"#f9ca24"}
+                    style={{ color: piece.side==="r"?"#eb4d4b":"#f9ca24" }} />
+                )}
+                {/* Tướng đang bị chiếu — vòng đỏ cảnh báo nhấp nháy */}
+                {inCheckHere && (
+                  <circle r={28} fill="none" stroke="#ff4757" strokeWidth={3} className="ct-check-ring" />
+                )}
                 <circle r={21} fill={piece.side==="r"?"#fdf3df":"#2b241c"}
                   stroke={isSel?"#3fae5c":piece.side==="r"?"#a3231f":"#c9a24a"}
                   strokeWidth={isSel?3.5:2.5} />
